@@ -84,8 +84,19 @@ object GuildSystem {
         return dx * dx + dz * dz <= radius * radius
     }
 
-    private fun checkPermsToManage(player: Player, location: Location): Boolean {
+    private fun checkPermsToManageCore(player: Player, location: Location): Boolean {
+        val plot = guilds.filter { it.value.plots.any { it.location == location } }
+            .map { it.value }
+            .firstOrNull() ?: return false
 
+        if (!plot.wars.contains(getGuildByMember(player.name)?.name)) {
+            player.sendMessage(LTCore.PREFIX + langManager.getString(player, "guild.plot_no_core_permission"))
+            return true
+        }
+        return false
+    }
+
+    private fun checkPermsToManage(player: Player, location: Location): Boolean {
         val plot = guilds.filter { it.value.plots.any { isLocationInRadius(it.location, location, it.radius) } }
             .map { it.value }
             .firstOrNull() ?: return false
@@ -119,6 +130,19 @@ object GuildSystem {
 
     @EventHandler(ignoreCancelled = true)
     private fun onBlockBreak(event: BlockBreakEvent) {
+        if (checkPermsToManageCore(event.player, event.block.location)) {
+            event.isCancelled = true
+            val guild = guilds.filter { it.value.plots.any { event.block.location == it.location } }
+                .map { it.value }
+                .firstOrNull() ?: return
+            
+            val plot = guild.plots.firstOrNull { event.block.location == it.location } ?: return
+            
+            guild.plots.removeIf { it.location == plot.location }
+            event.player.sendMessage(LTCore.PREFIX + langManager.getString(event.player, "guild.plot_core_destroyed"))
+            Utils.broadcast("guild.plot_core_destroyed_broadcast", mapOf("%g" to guild.name))
+            return
+        }
         event.isCancelled = checkPermsToManage(event.player, event.block.location)
     }
 
