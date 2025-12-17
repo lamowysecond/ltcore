@@ -1,6 +1,7 @@
 package pl.lamas.lt7core.system.guild
 
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.TextComponent
 import net.kyori.adventure.text.event.ClickEvent
 import org.bukkit.Bukkit
 import org.bukkit.Location
@@ -18,13 +19,14 @@ import pl.lamas.lt7core.util.filesystem.FilePersisted
 import pl.lamas.lt7core.LTCore
 import pl.lamas.lt7core.LTCore.Companion.config
 import pl.lamas.lt7core.LTCore.Companion.langManager
+import pl.lamas.lt7core.system.economy.MoneySystem
 import pl.lamas.lt7core.system.util.FriendsSystem.FriendRequest
 import pl.lamas.lt7core.system.util.FriendsSystem.friends
 import pl.lamas.lt7core.system.util.FriendsSystem.pendingFriendRequests
 import pl.lamas.lt7core.util.Utils
 import pl.lamas.lt7core.util.config.Config
 
-object GuildSystem {
+object GuildSystem : org.bukkit.event.Listener {
     data class WarDeclaration(
         val declaringGuild: String,
         val targetGuild: String,
@@ -80,10 +82,10 @@ object GuildSystem {
     val pendingPeaceRequests: MutableList<PeaceRequest> = mutableListOf()
 
     @FilePersisted("guilds.json", persistType = pl.lamas.lt7core.util.filesystem.PersistType.READ_SAVE, autoSaveIntervalSeconds = 60L)
-    val guilds: MutableMap<String, Guild> = mutableMapOf()
+    var guilds: MutableMap<String, Guild> = mutableMapOf()
 
     @FilePersisted("guild_wars.json", persistType = pl.lamas.lt7core.util.filesystem.PersistType.READ_SAVE, autoSaveIntervalSeconds = 60L)
-    val guildWars: MutableList<WarDeclaration> = mutableListOf()
+    var guildWars: MutableList<WarDeclaration> = mutableListOf()
 
     private fun isLocationInRadius(loc1: Location, loc2: Location, radius: Int): Boolean {
         val dx = loc1.x - loc2.x
@@ -153,6 +155,10 @@ object GuildSystem {
                 Utils.broadcast("guild.capital_core_destroyed_broadcast", mapOf("%g" to guild.name))
                 return
             }
+            event.isCancelled = true
+            guild.plots.remove(plot)
+            getGuildByMember(event.player.name)?.plots?.add(plot)
+
             event.player.sendMessage(LTCore.PREFIX + langManager.getString(event.player, "guild.plot_core_destroyed"))
             Utils.broadcast("guild.plot_core_destroyed_broadcast", mapOf("%g" to guild.name))
             return
@@ -173,6 +179,22 @@ object GuildSystem {
             val damager = event.damageSource as Player
             event.isCancelled = checkPermsToManage(damager, player.location)
         }
+    }
+    
+    init {
+        Bukkit.getPluginManager().registerEvents(this, LTCore.instance)
+        
+        Bukkit.getScheduler().runTaskTimer(LTCore.instance, Runnable { 
+            for (guild in guilds.values) {
+                guild.onlinePlayers.clear()
+                for (memberName in guild.members) {
+                    val memberPlayer = Bukkit.getPlayer(memberName)
+                    if (memberPlayer != null && memberPlayer.isOnline) {
+                        guild.onlinePlayers.add(memberPlayer)
+                    }
+                }
+            }
+        }, 0L, 20L * 15L)
     }
 
     fun getGuildByMember(playerName: String): Guild? {
@@ -218,6 +240,114 @@ object GuildSystem {
                 guilds.remove(guild.name)
                 sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.deleted_successfully", mapOf("%g" to guild.name)))
             }
+            "createplot" -> {
+                val guild = getGuildByMember(sender.name)
+                if (guild == null) {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.no_guild"))
+                    return
+                }
+
+                if (guild.owner != sender.name) {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.no_permission"))
+                    return
+                }
+
+
+                for (plot in guilds.values.flatMap { it.plots }) {
+                    if (isLocationInRadius(plot.location, sender.location, plot.radius + config.guildsMinDistanceBetweenPlots)) {
+                        sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.too_close_to_other_guild_plot"))
+                        return
+                    }
+                }
+
+                if (!MoneySystem.hasEnoughMoney(sender.name, config.plotsCreateCost)) {
+                    MoneySystem.removeMoney(sender.name, config.plotsCreateCost)
+                } else {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.not_enough_money", mapOf("%amount" to config.guildsCreateCost.toString())))
+                    return
+                }
+
+                val newPlot = Plot(
+                    id = "Plot ${guild.plots.size + 1}",
+                    location = sender.location.clone().apply {
+                        y = 65.0
+                    },
+                    radius = config.guildsPlotSize,
+                    isCapital = false
+                )
+                guild.plots.add(newPlot)
+
+                sender.location.clone().apply {
+                    y = 65.0
+                }.block.type = Material.REINFORCED_DEEPSLATE
+
+                sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.plot_created_successfully", mapOf("%id" to newPlot.id)))
+            }
+            "pay" -> {
+                val amountStr = args.getOrNull(0)
+                if (amountStr == null) {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.usage_pay", mapOf("%cmd" to "/guild pay <amount>")))
+                    return
+                }
+
+                val amount = amountStr.toDoubleOrNull()
+                if (amount == null || amount <= 0) {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.invalid_amount"))
+                    return
+                }
+
+                val guild = getGuildByMember(sender.name)
+                if (guild == null) {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.no_guild"))
+                    return
+                }
+
+                if (!MoneySystem.hasEnoughMoney(sender.name, amount)) {
+                    MoneySystem.removeMoney(sender.name, amount)
+                } else {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.not_enough_money", mapOf("%amount" to amount.toString())))
+                    return
+                }
+
+                guild.bankBalance += amount
+                sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.paid_to_guild_bank", mapOf("%amount" to amount.toString())))
+            }
+            "plots" -> {
+                val guild = if (args.isEmpty()) {
+                    getGuildByMember(sender.name)
+                } else {
+                    guilds.filter { it.value.tag == args.getOrNull(0) }
+                        .map { it.value }
+                        .firstOrNull()
+                }
+                if (guild == null) {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.no_guild"))
+                    return
+                }
+
+                sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.plots.header", mapOf("%g" to guild.name)))
+                for (plot in guild.plots) {
+                    sender.sendMessage(
+                        Component.text(
+                            langManager.getString(sender, "guild.plots.entry", mapOf(
+                                "%id" to plot.id,
+                                "%x" to plot.location.x.toInt().toString(),
+                                "%y" to plot.location.y.toInt().toString(),
+                                "%z" to plot.location.z.toInt().toString(),
+                                "%r" to plot.radius.toString(),
+                                "%cap" to if (plot.isCapital && guild.members.contains(sender.name)) langManager.getString(sender, "guild.plots.capital") else ""
+                            ))).append(
+                            Component.text(" §f[TP]")
+                                .clickEvent(ClickEvent.runCommand("tp ${plot.location.x.toInt()} ${plot.location.y.toInt()} ${plot.location.z.toInt()}") )
+                                .hoverEvent(Component.text(langManager.getString(sender, "guild.plots.tp_hover")))
+                            ).append(
+                                Component.text(langManager.getString(sender, "guild.plots.delete_btn"))
+                                    .clickEvent(ClickEvent.callback(TODO())))
+                                    .hoverEvent(Component.text(langManager.getString(sender, "guild.plots.delete_hover"))
+                            )
+                    )
+                }
+            }
             "create" -> {
                 val guildName = args.getOrNull(0)
                 val guildTag = args.getOrNull(1)
@@ -256,6 +386,13 @@ object GuildSystem {
                     return
                 }
 
+                if (!MoneySystem.hasEnoughMoney(sender.name, config.guildsCreateCost)) {
+                    MoneySystem.removeMoney(sender.name, config.guildsCreateCost)
+                } else {
+                    sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.not_enough_money", mapOf("%amount" to config.guildsCreateCost.toString())))
+                    return
+                }
+
                 val newGuild = Guild(
                     name = guildName,
                     tag = guildTag,
@@ -263,7 +400,9 @@ object GuildSystem {
                     plots = mutableListOf(
                         Plot(
                             id = "Plot 1",
-                            location = sender.location.clone().add(0.0, -1.0, 0.0),
+                            location = sender.location.clone().apply {
+                                y = 65.0
+                            },
                             radius = config.guildsPlotSize,
                             isCapital = true
                         )
@@ -469,7 +608,7 @@ object GuildSystem {
                 sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.joined_guild", mapOf("%g" to guild.name)))
                 Bukkit.getPlayer(guild.owner)?.sendMessage(
                     LTCore.PREFIX + langManager.getString(
-                        sender,
+                        Bukkit.getPlayer(guild.owner)!!,
                         "guild.member_joined",
                         mapOf("%p" to sender.name)
                     )
@@ -498,7 +637,7 @@ object GuildSystem {
                 sender.sendMessage(LTCore.PREFIX + langManager.getString(sender, "guild.invite_denied", mapOf("%g" to guild.name)))
                 Bukkit.getPlayer(guild.owner)?.sendMessage(
                     LTCore.PREFIX + langManager.getString(
-                        sender,
+                        Bukkit.getPlayer(guild.owner)!!,
                         "guild.invite_denied_by",
                         mapOf("%p" to sender.name)
                     )
